@@ -1,20 +1,37 @@
 # Video Processor AI
 
-API em FastAPI para transformar vídeos longos em cortes inteligentes com contexto.
+API em FastAPI para analisar vídeos longos e gerar automaticamente os melhores cortes com contexto.
 
-## Fluxo
+## O que mudou na v3
 
-1. Recebe um vídeo por upload ou URL.
-2. Extrai o áudio com FFmpeg.
-3. Transcreve com Faster Whisper e mantém timestamps.
-4. Envia a transcrição ao Gemini.
-5. A IA seleciona os melhores trechos que funcionam sozinhos e preservam contexto.
-6. O FFmpeg gera os cortes finais.
+- upload de vídeo e processamento por URL;
+- processamento em background com `job_id`;
+- endpoint de status/progresso;
+- transcrição com Faster Whisper e timestamps por palavra;
+- análise em blocos para vídeos longos;
+- segunda etapa de ranking global dos candidatos;
+- proteção contra cortes muito parecidos/sobrepostos;
+- download direto dos cortes;
+- limite configurável de tamanho e duração;
+- limpeza automática de arquivos antigos;
+- chave do Gemini somente por variável de ambiente.
+
+## Pipeline
+
+1. vídeo entra por upload ou URL;
+2. FFmpeg extrai o áudio;
+3. Faster Whisper transcreve com timestamps;
+4. a transcrição é dividida em blocos com sobreposição;
+5. Gemini gera candidatos de cada bloco;
+6. candidatos são deduplicados;
+7. Gemini faz ranking final do vídeo inteiro;
+8. timestamps são ajustados para fronteiras de palavras;
+9. FFmpeg gera os cortes finais em MP4.
 
 ## Requisitos
 
 - Python 3.10+
-- FFmpeg e FFprobe disponíveis no PATH
+- FFmpeg e FFprobe no PATH
 
 Instalação:
 
@@ -22,45 +39,35 @@ Instalação:
 pip install -r requirements.txt
 ```
 
-Crie um `.env` ou defina as variáveis de ambiente conforme `.env.example`.
-
-> A chave antiga do Gemini que já apareceu no histórico do repositório deve ser revogada e substituída.
-
-## Executar
-
-Windows PowerShell:
+No PowerShell:
 
 ```powershell
-$env:GEMINI_API_KEY="SUA_CHAVE"
+$env:GEMINI_API_KEY="SUA_NOVA_CHAVE"
 uvicorn main:app --reload
 ```
 
-Abra:
-
-- API: http://127.0.0.1:8000
-- Swagger: http://127.0.0.1:8000/docs
-
-## Processar arquivo
-
-Endpoint:
+Swagger:
 
 ```
-POST /process-upload
+http://127.0.0.1:8000/docs
 ```
 
-Parâmetros opcionais:
+## Upload
 
-- `max_cortes`: padrão 3
-- `min_duracao`: padrão 45s
-- `max_duracao`: padrão 180s
+`POST /process-upload`
 
-## Processar URL
+Parâmetros:
+- `max_cortes`: 1 a 10
+- `min_duracao`: mínimo 15s
+- `max_duracao`: deve ser maior que o mínimo
 
-```
-POST /process-url
-```
+A resposta retorna um `job_id`.
 
-Exemplo JSON:
+## URL
+
+`POST /process-url`
+
+Exemplo:
 
 ```json
 {
@@ -71,8 +78,43 @@ Exemplo JSON:
 }
 ```
 
-Os cortes são salvos em `clips/<job_id>/`.
+## Status
 
-## Observação sobre qualidade
+`GET /jobs/{job_id}`
 
-O modelo Whisper padrão é `small`, adequado para CPU. Para maior precisão, defina `WHISPER_MODEL=medium` ou `large-v3`, sabendo que isso exige mais memória e processamento.
+Estados:
+- queued
+- validating
+- transcribing
+- analyzing
+- cutting
+- done
+- error
+
+## Download
+
+Depois de `done`:
+
+`GET /jobs/{job_id}/clips/1`
+
+Troque `1` pelo número do corte.
+
+## Configuração
+
+Veja `.env.example`.
+
+Para mais qualidade na transcrição:
+
+```powershell
+$env:WHISPER_MODEL="medium"
+```
+
+ou, em máquina forte:
+
+```powershell
+$env:WHISPER_MODEL="large-v3"
+```
+
+## Segurança
+
+A chave antiga do Gemini que apareceu anteriormente no histórico do repositório deve ser revogada. Nunca coloque a nova chave diretamente no código.
