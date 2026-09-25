@@ -16,7 +16,11 @@ def _get_model():
             "WHISPER_COMPUTE_TYPE",
             "int8" if device == "cpu" else "float16",
         )
-        _MODEL = WhisperModel(model_size, device=device, compute_type=compute_type)
+        _MODEL = WhisperModel(
+            model_size,
+            device=device,
+            compute_type=compute_type,
+        )
     return _MODEL
 
 def _duracao_video(video_path: str) -> float:
@@ -57,18 +61,34 @@ def transcrever_video(video_path: str):
             audio_path,
             beam_size=5,
             vad_filter=True,
-            word_timestamps=False,
+            vad_parameters=dict(min_silence_duration_ms=350),
+            word_timestamps=True,
+            condition_on_previous_text=True,
         )
 
         items = []
         for seg in segments:
             texto = seg.text.strip()
-            if texto:
-                items.append({
-                    "start": float(seg.start),
-                    "end": float(seg.end),
-                    "text": texto,
+            if not texto:
+                continue
+
+            words = []
+            for word in seg.words or []:
+                if word.start is None or word.end is None:
+                    continue
+                words.append({
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "word": word.word,
+                    "probability": getattr(word, "probability", None),
                 })
+
+            items.append({
+                "start": float(seg.start),
+                "end": float(seg.end),
+                "text": texto,
+                "words": words,
+            })
 
     return {
         "duration": duration,
