@@ -1,51 +1,51 @@
 import os
+import re
 import subprocess
-import math
 
-# Agora a função aceita 'duration' (padrão 30s se não informar)
-def cortar_video(input_path, output_dir, duration=30):
+def _slug(texto: str) -> str:
+    texto = re.sub(r"[^a-zA-Z0-9_-]+", "_", texto.strip())
+    return texto.strip("_")[:60] or "corte"
+
+def cortar_segmentos(input_path: str, output_dir: str, segmentos):
     os.makedirs(output_dir, exist_ok=True)
+    resultados = []
 
-    # 1. Descobrir a duração total do vídeo original
-    cmd_probe = [
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", input_path
-    ]
-    result = subprocess.run(cmd_probe, capture_output=True, text=True)
-    
-    try:
-        total_duration = float(result.stdout.strip())
-    except:
-        total_duration = 0 # Fallback
+    for indice, segmento in enumerate(segmentos, start=1):
+        inicio = float(segmento["start_seconds"])
+        fim = float(segmento["end_seconds"])
+        duracao = fim - inicio
 
-    print(f"   ⏱️ Duração total: {total_duration}s | Cortes de: {duration}s")
-
-    clips = []
-    
-    # Lógica simples: Cria cortes sequenciais baseados no tempo escolhido
-    # Ex: Se pediu 60s, corta 0-60, 60-120...
-    num_cortes = math.floor(total_duration / duration)
-    
-    # Limita a 5 cortes para não travar seu PC testando vídeos longos
-    if num_cortes > 5:
-        num_cortes = 5
-        print("   ⚠️ Limitando a 5 cortes para teste rápido.")
-
-    for i in range(num_cortes):
-        start_time = i * duration
-        clip_name = f"clip_{i+1}.mp4"
-        clip_path = os.path.join(output_dir, clip_name)
+        nome = f"{indice:02d}_{_slug(segmento.get('title', 'corte'))}.mp4"
+        clip_path = os.path.join(output_dir, nome)
 
         cmd = [
             "ffmpeg", "-y",
-            "-ss", str(start_time),
+            "-ss", f"{inicio:.3f}",
             "-i", input_path,
-            "-t", str(duration), # Aqui definimos o tempo exato
-            "-c", "copy", # Copia rápido sem re-codificar
-            clip_path
+            "-t", f"{duracao:.3f}",
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            clip_path,
         ]
-        
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        clips.append(clip_path)
 
-    return clips
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg falhou no corte {indice}: {result.stderr[-1000:]}")
+
+        resultados.append({
+            "file": clip_path,
+            "title": segmento.get("title"),
+            "start": inicio,
+            "end": fim,
+            "duration": round(duracao, 3),
+            "virality_score": segmento.get("virality_score"),
+            "reason": segmento.get("reason"),
+        })
+
+    return resultados
