@@ -1,9 +1,9 @@
 import json
 import os
 import re
-from typing import List
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 def formatar_tempo(segundos: float) -> str:
     segundos = max(0, int(segundos))
@@ -22,14 +22,27 @@ def tempo_para_segundos(valor) -> float:
         return partes[0] * 3600 + partes[1] * 60 + partes[2]
     raise ValueError(f"Timestamp inválido: {valor}")
 
-def _configurar_modelo():
+def _configurar_cliente():
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("Defina a variável de ambiente GEMINI_API_KEY.")
+    return genai.Client(api_key=api_key)
 
-    genai.configure(api_key=api_key)
-    nome = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    return genai.GenerativeModel(nome)
+def _modelo():
+    return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+def _gerar_json(client, prompt: str):
+    response = client.models.generate_content(
+        model=_modelo(),
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.25,
+        ),
+    )
+    if not response.text:
+        raise RuntimeError("Gemini não retornou conteúdo.")
+    return _parse_json_response(response.text)
 
 def _parse_json_response(text: str):
     text = text.strip()
@@ -47,53 +60,37 @@ def _segment_text(seg):
 def _build_chunks(segments, chunk_seconds=900, overlap_seconds=90):
     if not segments:
         return []
-
     chunks = []
     start = 0.0
     max_end = max(float(s["end"]) for s in segments)
-
     while start < max_end:
         end = start + chunk_seconds
-        selected = [
-            s for s in segments
-            if float(s["end"]) >= start and float(s["start"]) <= end
-        ]
+        selected = [s for s in segments if float(s["end"]) >= start and float(s["start"]) <= end]
         if selected:
             chunks.append(selected)
         start += max(60, chunk_seconds - overlap_seconds)
-
     return chunks
 
 def _closest_word_boundary(segments, target: float, mode: str) -> float:
-    words = []
-    for seg in segments:
-        for word in seg.get("words") or []:
-            words.append(word)
-
+    words = [word for seg in segments for word in (seg.get("words") or [])]
     if not words:
         return target
-
     if mode == "start":
-        candidates = [w["start"] for w in words if w["start"] <= target + 2.0]
-        return max(candidates) if candidates else target
-
-    candidates = [w["end"] for w in words if w["end"] >= target - 2.0]
-    return min(candidates) if candidates else target
+        candidates = [w["start"] for w in words if target - 2.0 <= w["start"] <= target + 0.5]
+        return min(candidates, key=lambda x: abs(x - target)) if candidates else target
+    candidates = [w["end"] for w in words if target - 0.5 <= w["end"] <= target + 2.0]
+    return min(candidates, key=lambda x: abs(x - target)) if candidates else target
 
 def _normalize_candidate(item, segments, duration_video, min_duracao, max_duracao):
     inicio = max(0.0, tempo_para_segundos(item.get("start_time")))
     fim = min(float(duration_video), tempo_para_segundos(item.get("end_time")))
-
     inicio = _closest_word_boundary(segments, inicio, "start")
     fim = _closest_word_boundary(segments, fim, "end")
-
     if fim <= inicio:
         return None
-
     duracao = fim - inicio
     if duracao < min_duracao or duracao > max_duracao:
         return None
-
     return {
         "start_time": formatar_tempo(inicio),
         "end_time": formatar_tempo(fim),
@@ -106,25 +103,21 @@ def _normalize_candidate(item, segments, duration_video, min_duracao, max_duraca
         "reason": str(item.get("reason") or "").strip()[:500],
     }
 
-def _ask_candidates(model, chunk, min_duracao, max_duracao, limit=5):
+def _ask_candidates(client, chunk, min_duracao, max_duracao, limit=5):
     transcript = "\n".join(_segment_text(s) for s in chunk)
     prompt = f"""
 Você é um editor profissional de podcasts, entrevistas e vídeos longos.
-
 Analise SOMENTE a transcrição abaixo e proponha até {limit} candidatos de corte.
 Cada candidato deve funcionar sozinho, com contexto suficiente para quem não viu o vídeo original.
 
 Regras:
 - duração entre {min_duracao} e {max_duracao} segundos;
-- começar no início de uma ideia;
-- terminar depois da conclusão natural;
-- evitar introduções vazias, cumprimentos e partes sem payoff;
-- priorizar história completa, revelação, conflito, humor, emoção, opinião forte, dica útil ou explicação surpreendente;
-- não inventar nada;
-- não cortar no meio de uma frase;
+- começar no início de uma ideia e terminar após sua conclusão natural;
+- evitar introduções vazias e trechos sem payoff;
+- priorizar história, revelação, conflito, humor, emoção, opinião forte, dica útil ou explicação surpreendente;
+- não inventar conteúdo e não cortar no meio de frase;
 - usar timestamps existentes;
-- dar virality_score de 0 a 100;
-- dar context_score de 0 a 100;
+- dar virality_score e context_score de 0 a 100;
 - retornar APENAS JSON válido.
 
 Formato:
@@ -142,95 +135,66 @@ Formato:
 TRANSCRIÇÃO:
 {transcript}
 """
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(response_mime_type="application/json"),
-    )
-    data = _parse_json_response(response.text)
+    data = _gerar_json(client, prompt)
     return data if isinstance(data, list) else []
 
-def _rank_final(model, candidates, max_cortes):
+def _rank_final(client, candidates, max_cortes):
     compact = json.dumps(candidates, ensure_ascii=False)
     prompt = f"""
-Você é o editor-chefe. Abaixo estão candidatos de cortes já validados.
+Você é o editor-chefe. Escolha até {max_cortes} melhores cortes entre os candidatos abaixo.
 
-Escolha até {max_cortes} melhores cortes no conjunto inteiro.
 Critérios, em ordem:
 1. contexto completo;
 2. começo forte sem depender do trecho anterior;
 3. conclusão satisfatória;
-4. potencial de retenção/compartilhamento;
+4. retenção e potencial de compartilhamento;
 5. diversidade de assunto;
-6. evitar cortes muito parecidos ou sobrepostos.
+6. evitar cortes parecidos ou sobrepostos.
 
-Retorne APENAS um array JSON com os índices dos escolhidos, na melhor ordem.
+Retorne APENAS um array JSON com os índices escolhidos, na melhor ordem.
 Exemplo: [2, 0, 5]
 
 CANDIDATOS:
 {compact}
 """
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(response_mime_type="application/json"),
-    )
-    data = _parse_json_response(response.text)
+    data = _gerar_json(client, prompt)
     if not isinstance(data, list):
         return []
-    return [int(i) for i in data if isinstance(i, (int, float, str)) and str(i).isdigit()]
+    result = []
+    for value in data:
+        try:
+            result.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return result
 
-def analisar_video_com_gemini(
-    segments,
-    duration_video,
-    max_cortes=3,
-    min_duracao=45,
-    max_duracao=180,
-):
+def analisar_video_com_gemini(segments, duration_video, max_cortes=3, min_duracao=45, max_duracao=180):
     if not segments:
         return []
 
-    model = _configurar_modelo()
+    client = _configurar_cliente()
     chunk_seconds = int(os.getenv("AI_CHUNK_SECONDS", "900"))
     overlap_seconds = int(os.getenv("AI_CHUNK_OVERLAP_SECONDS", "90"))
 
     all_candidates = []
     for chunk in _build_chunks(segments, chunk_seconds, overlap_seconds):
-        raw = _ask_candidates(
-            model,
-            chunk,
-            min_duracao=min_duracao,
-            max_duracao=max_duracao,
-            limit=max(5, max_cortes * 2),
-        )
+        raw = _ask_candidates(client, chunk, min_duracao, max_duracao, max(5, max_cortes * 2))
         for item in raw:
             try:
-                normalized = _normalize_candidate(
-                    item,
-                    segments,
-                    duration_video,
-                    min_duracao,
-                    max_duracao,
-                )
+                normalized = _normalize_candidate(item, segments, duration_video, min_duracao, max_duracao)
                 if normalized:
                     all_candidates.append(normalized)
-            except Exception:
+            except (KeyError, TypeError, ValueError):
                 continue
 
     if not all_candidates:
         return []
 
     deduped = []
-    for cand in sorted(
-        all_candidates,
-        key=lambda x: (x["context_score"], x["virality_score"]),
-        reverse=True,
-    ):
+    for cand in sorted(all_candidates, key=lambda x: (x["context_score"], x["virality_score"]), reverse=True):
         duplicate = False
         for existing in deduped:
-            overlap = max(
-                0.0,
-                min(cand["end_seconds"], existing["end_seconds"])
-                - max(cand["start_seconds"], existing["start_seconds"]),
-            )
+            overlap = max(0.0, min(cand["end_seconds"], existing["end_seconds"]) - max(cand["start_seconds"], existing["start_seconds"]))
             shorter = min(cand["duration"], existing["duration"])
             if shorter and overlap / shorter > 0.65:
                 duplicate = True
@@ -238,15 +202,16 @@ def analisar_video_com_gemini(
         if not duplicate:
             deduped.append(cand)
 
-    shortlist = deduped[: min(20, len(deduped))]
-    order = _rank_final(model, shortlist, max_cortes)
+    shortlist = deduped[:20]
+    try:
+        order = _rank_final(client, shortlist, max_cortes)
+    except Exception:
+        order = []
 
     chosen = []
     for idx in order:
-        if 0 <= idx < len(shortlist):
-            candidate = shortlist[idx]
-            if candidate not in chosen:
-                chosen.append(candidate)
+        if 0 <= idx < len(shortlist) and shortlist[idx] not in chosen:
+            chosen.append(shortlist[idx])
         if len(chosen) >= max_cortes:
             break
 
@@ -256,5 +221,4 @@ def analisar_video_com_gemini(
                 chosen.append(candidate)
             if len(chosen) >= max_cortes:
                 break
-
     return chosen
