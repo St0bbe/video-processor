@@ -50,7 +50,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.2.0",
+    version="3.3.0",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -146,16 +146,36 @@ def health():
     return {
         "status": "online",
         "service": "Cortes Inteligentes com IA",
-        "version": "3.2.0",
+        "version": "3.3.0",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
     }
 
 def baixar_video(url: str, destination: Path) -> str:
+    info_cmd = [
+        "yt-dlp", "--no-playlist", "--dump-single-json",
+        "--skip-download", url,
+    ]
+    info_result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=60)
+    if info_result.returncode != 0:
+        raise RuntimeError(f"Não foi possível acessar o vídeo: {info_result.stderr[-1000:]}")
+
+    try:
+        info = json.loads(info_result.stdout)
+        if info.get("is_live") is True or info.get("live_status") == "is_live":
+            raise RuntimeError(
+                "Este vídeo ainda está AO VIVO. Aguarde a transmissão terminar "
+                "ou envie um arquivo gravado para gerar os cortes."
+            )
+    except json.JSONDecodeError:
+        pass
+
     cmd = [
         "yt-dlp",
         "--no-playlist",
         "--newline",
+        "--socket-timeout", "30",
+        "--retries", "3",
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
         "--merge-output-format", "mp4",
         "--force-overwrites",
@@ -168,6 +188,25 @@ def baixar_video(url: str, destination: Path) -> str:
     if not destination.exists():
         raise RuntimeError("O download terminou, mas o arquivo não foi encontrado.")
     return str(destination)
+
+def _processar_url_job(job_id: str, url: str, destination: str, max_cortes: int, min_duracao: int, max_duracao: int):
+    try:
+        _update_job(
+            job_id,
+            status="downloading",
+            progress=3,
+            message="Baixando o vídeo. Em vídeos longos isso pode levar alguns minutos.",
+        )
+        baixar_video(url, Path(destination))
+        _processar_job(job_id, destination, max_cortes, min_duracao, max_duracao)
+    except Exception as exc:
+        _update_job(
+            job_id,
+            status="error",
+            progress=100,
+            message="Falha no processamento",
+            error=str(exc),
+        )
 
 def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: int, max_duracao: int):
     output_dir = CLIPS_DIR / job_id
@@ -245,22 +284,38 @@ def _create_job(source_type: str, source: str, video_path: str, max_cortes: int,
 @app.post("/process-url")
 def process_url(data: VideoRequest):
     _validate_durations(data.min_duracao, data.max_duracao)
-    video_id = str(uuid.uuid4())
-    destination = DOWNLOAD_DIR / f"{video_id}.mp4"
+    job_id = str(uuid.uuid4())
+    destination = DOWNLOAD_DIR / f"{job_id}.mp4"
+    now = time.time()
 
-    try:
-        baixar_video(str(data.url), destination)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _save_job(job_id, {
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "message": "Preparando download",
+        "source_type": "url",
+        "source": str(data.url),
+        "video_path": str(destination),
+        "created_at": now,
+        "updated_at": now,
+        "result": None,
+        "error": None,
+    })
 
-    return _create_job(
-        "url",
-        str(data.url),
-        str(destination),
-        data.max_cortes,
-        data.min_duracao,
-        data.max_duracao,
+    thread = threading.Thread(
+        target=_processar_url_job,
+        args=(
+            job_id,
+            str(data.url),
+            str(destination),
+            data.max_cortes,
+            data.min_duracao,
+            data.max_duracao,
+        ),
+        daemon=True,
     )
+    thread.start()
+    return _load_job(job_id)
 
 @app.post("/process-upload")
 async def process_upload(
