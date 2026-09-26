@@ -51,7 +51,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.5.0",
+    version="3.5.1",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -159,20 +159,50 @@ def health():
     return {
         "status": "online",
         "service": "Cortes Inteligentes com IA",
-        "version": "3.5.0",
+        "version": "3.5.1",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_downloaded_video_mb": MAX_DOWNLOADED_VIDEO_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
     }
 
+def _yt_dlp_js_args():
+    """Configura um runtime JS suportado pelo yt-dlp para os desafios do YouTube."""
+    if shutil.which("deno"):
+        return ["--js-runtimes", "deno"]
+    if shutil.which("node"):
+        return ["--js-runtimes", "node"]
+    if shutil.which("bun"):
+        return ["--js-runtimes", "bun"]
+    if shutil.which("qjs"):
+        return ["--js-runtimes", "quickjs"]
+    return []
+
+
+def _friendly_ytdlp_error(stderr: str) -> str:
+    text = stderr or ""
+    lower = text.lower()
+    if "no supported javascript runtime" in lower:
+        return (
+            "O YouTube exige um runtime JavaScript para liberar este vídeo. "
+            "Instale Node.js 22+ ou Deno 2.3+ e reinicie o aplicativo."
+        )
+    if "403" in lower or "forbidden" in lower:
+        return (
+            "O YouTube bloqueou o download deste vídeo (erro 403). "
+            "Atualize as dependências do projeto e confirme que Node.js 22+ ou Deno 2.3+ está instalado."
+        )
+    return f"Não foi possível baixar o vídeo. Detalhes: {text[-700:]}"
+
+
 def baixar_video(url: str, destination: Path) -> str:
+    js_args = _yt_dlp_js_args()
     info_cmd = [
         "yt-dlp", "--no-playlist", "--dump-single-json",
-        "--skip-download", url,
+        "--skip-download", *js_args, url,
     ]
     info_result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=60)
     if info_result.returncode != 0:
-        raise RuntimeError(f"Não foi possível acessar o vídeo: {info_result.stderr[-1000:]}")
+        raise RuntimeError(_friendly_ytdlp_error(info_result.stderr))
 
     try:
         info = json.loads(info_result.stdout)
@@ -190,6 +220,7 @@ def baixar_video(url: str, destination: Path) -> str:
         "--newline",
         "--socket-timeout", "30",
         "--retries", "3",
+        *js_args,
         "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/best[height<=1080]",
         "--merge-output-format", "mp4",
         "--force-overwrites",
@@ -198,7 +229,7 @@ def baixar_video(url: str, destination: Path) -> str:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"Erro ao baixar o vídeo: {result.stderr[-1200:]}")
+        raise RuntimeError(_friendly_ytdlp_error(result.stderr))
     if not destination.exists():
         raise RuntimeError("O download terminou, mas o arquivo não foi encontrado.")
     return str(destination)
