@@ -26,6 +26,7 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "4096"))
 MAX_DOWNLOADED_VIDEO_MB = int(os.getenv("MAX_DOWNLOADED_VIDEO_MB", "8192"))
 MAX_VIDEO_MINUTES = int(os.getenv("MAX_VIDEO_MINUTES", "240"))
 RETENTION_HOURS = int(os.getenv("RETENTION_HOURS", "48"))
+MIN_FREE_DISK_GB = float(os.getenv("MIN_FREE_DISK_GB", "8"))
 
 for folder in (DOWNLOAD_DIR, UPLOAD_DIR, CLIPS_DIR, JOBS_DIR):
     folder.mkdir(exist_ok=True)
@@ -51,7 +52,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.5.1",
+    version="3.6.0",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -159,7 +160,7 @@ def health():
     return {
         "status": "online",
         "service": "Cortes Inteligentes com IA",
-        "version": "3.5.1",
+        "version": "3.6.0",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_downloaded_video_mb": MAX_DOWNLOADED_VIDEO_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
@@ -194,6 +195,29 @@ def _friendly_ytdlp_error(stderr: str) -> str:
     return f"Não foi possível baixar o vídeo. Detalhes: {text[-700:]}"
 
 
+def _ensure_disk_space(path: Path, min_free_gb: float = MIN_FREE_DISK_GB):
+    usage = shutil.disk_usage(path)
+    free_gb = usage.free / (1024 ** 3)
+    if free_gb < min_free_gb:
+        raise RuntimeError(
+            f"Espaço insuficiente no disco. Disponível: {free_gb:.1f} GB. "
+            f"Libere pelo menos {min_free_gb:.0f} GB antes de processar o vídeo."
+        )
+
+
+def _cleanup_download_artifacts(destination: Path, keep_final: bool = False):
+    """Remove restos .part/.temp e formatos separados criados pelo yt-dlp."""
+    stem = destination.stem
+    for item in destination.parent.glob(f"{stem}*"):
+        try:
+            if keep_final and item.resolve() == destination.resolve():
+                continue
+            if item.is_file():
+                item.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def baixar_video(url: str, destination: Path) -> str:
     js_args = _yt_dlp_js_args()
     info_cmd = [
@@ -221,7 +245,7 @@ def baixar_video(url: str, destination: Path) -> str:
         "--socket-timeout", "30",
         "--retries", "3",
         *js_args,
-        "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/best[height<=1080]",
+        "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/best[height<=720]",
         "--merge-output-format", "mp4",
         "--force-overwrites",
         "-o", str(destination),
@@ -229,6 +253,7 @@ def baixar_video(url: str, destination: Path) -> str:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        _cleanup_download_artifacts(destination, keep_final=False)
         raise RuntimeError(_friendly_ytdlp_error(result.stderr))
     if not destination.exists():
         raise RuntimeError("O download terminou, mas o arquivo não foi encontrado.")
@@ -245,6 +270,7 @@ def _processar_url_job(job_id: str, url: str, destination: str, max_cortes: int,
         baixar_video(url, Path(destination))
         _processar_job(job_id, destination, max_cortes, min_duracao, max_duracao, "url")
     except Exception as exc:
+        _cleanup_download_artifacts(Path(destination), keep_final=False)
         _update_job(
             job_id,
             status="error",
@@ -304,6 +330,11 @@ def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: i
             message="Processamento concluído",
             result=result,
         )
+
+        # Para links, os cortes finais ficam em clips/ e o vídeo original
+        # baixado não precisa continuar ocupando vários GB.
+        if source_type == "url":
+            _cleanup_download_artifacts(Path(video_path), keep_final=False)
     except Exception as exc:
         _update_job(
             job_id,
