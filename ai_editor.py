@@ -29,7 +29,7 @@ def _configurar_cliente():
     return genai.Client(api_key=api_key)
 
 def _modelo():
-    return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    return os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 def _gerar_json(client, prompt: str):
     response = client.models.generate_content(
@@ -37,7 +37,6 @@ def _gerar_json(client, prompt: str):
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.25,
         ),
     )
     if not response.text:
