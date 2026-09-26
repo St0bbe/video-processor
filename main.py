@@ -22,7 +22,8 @@ UPLOAD_DIR = BASE_DIR / "uploads"
 CLIPS_DIR = BASE_DIR / "clips"
 JOBS_DIR = BASE_DIR / "jobs"
 
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "2048"))
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "4096"))
+MAX_DOWNLOADED_VIDEO_MB = int(os.getenv("MAX_DOWNLOADED_VIDEO_MB", "8192"))
 MAX_VIDEO_MINUTES = int(os.getenv("MAX_VIDEO_MINUTES", "240"))
 RETENTION_HOURS = int(os.getenv("RETENTION_HOURS", "48"))
 
@@ -50,7 +51,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.3.0",
+    version="3.4.0",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -146,7 +147,7 @@ def health():
     return {
         "status": "online",
         "service": "Cortes Inteligentes com IA",
-        "version": "3.3.0",
+        "version": "3.4.0",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
     }
@@ -176,7 +177,7 @@ def baixar_video(url: str, destination: Path) -> str:
         "--newline",
         "--socket-timeout", "30",
         "--retries", "3",
-        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
+        "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/best[height<=1080]",
         "--merge-output-format", "mp4",
         "--force-overwrites",
         "-o", str(destination),
@@ -198,7 +199,7 @@ def _processar_url_job(job_id: str, url: str, destination: str, max_cortes: int,
             message="Baixando o vídeo. Em vídeos longos isso pode levar alguns minutos.",
         )
         baixar_video(url, Path(destination))
-        _processar_job(job_id, destination, max_cortes, min_duracao, max_duracao)
+        _processar_job(job_id, destination, max_cortes, min_duracao, max_duracao, "url")
     except Exception as exc:
         _update_job(
             job_id,
@@ -208,13 +209,13 @@ def _processar_url_job(job_id: str, url: str, destination: str, max_cortes: int,
             error=str(exc),
         )
 
-def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: int, max_duracao: int):
+def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: int, max_duracao: int, source_type: str = "upload"):
     output_dir = CLIPS_DIR / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         _update_job(job_id, status="validating", progress=5, message="Validando vídeo")
-        _validate_video_limits(video_path)
+        _validate_video_limits(video_path, source_type)
 
         _update_job(job_id, status="transcribing", progress=15, message="Transcrevendo vídeo")
         transcricao = transcrever_video(video_path)
@@ -275,7 +276,7 @@ def _create_job(source_type: str, source: str, video_path: str, max_cortes: int,
     })
     thread = threading.Thread(
         target=_processar_job,
-        args=(job_id, video_path, max_cortes, min_duracao, max_duracao),
+        args=(job_id, video_path, max_cortes, min_duracao, max_duracao, source_type),
         daemon=True,
     )
     thread.start()
