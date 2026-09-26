@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import random
+import time
 
 from google import genai
 from google.genai import types
@@ -31,17 +33,49 @@ def _configurar_cliente():
 def _modelo():
     return os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
+def _is_transient_gemini_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(token in text for token in (
+        "429", "500", "502", "503", "504",
+        "resource_exhausted", "unavailable", "deadline_exceeded",
+        "high demand", "temporarily", "timeout",
+    ))
+
+
 def _gerar_json(client, prompt: str):
-    response = client.models.generate_content(
-        model=_modelo(),
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        ),
-    )
-    if not response.text:
-        raise RuntimeError("Gemini não retornou conteúdo.")
-    return _parse_json_response(response.text)
+    max_attempts = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "6")))
+    base_delay = max(1.0, float(os.getenv("GEMINI_RETRY_BASE_SECONDS", "3")))
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = client.models.generate_content(
+                model=_modelo(),
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                ),
+            )
+            if not response.text:
+                raise RuntimeError("Gemini não retornou conteúdo.")
+            return _parse_json_response(response.text)
+        except Exception as exc:
+            if not _is_transient_gemini_error(exc) or attempt >= max_attempts:
+                if _is_transient_gemini_error(exc):
+                    raise RuntimeError(
+                        "O Gemini está temporariamente sobrecarregado. "
+                        f"Foram feitas {max_attempts} tentativas automáticas. "
+                        "Tente novamente em alguns minutos."
+                    ) from exc
+                raise
+
+            delay = min(45.0, base_delay * (2 ** (attempt - 1)))
+            delay += random.uniform(0, min(2.0, delay * 0.2))
+            print(
+                f"Gemini temporariamente indisponível "
+                f"(tentativa {attempt}/{max_attempts}). "
+                f"Nova tentativa em {delay:.1f}s..."
+            )
+            time.sleep(delay)
 
 def _parse_json_response(text: str):
     text = text.strip()
