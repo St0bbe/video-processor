@@ -29,7 +29,36 @@ RETENTION_HOURS = int(os.getenv("RETENTION_HOURS", "48"))
 for folder in (DOWNLOAD_DIR, UPLOAD_DIR, CLIPS_DIR, JOBS_DIR):
     folder.mkdir(exist_ok=True)
 
-app = FastAPI(title="Video Processor AI", version="3.0.0")
+app = FastAPI(
+    title="Cortes Inteligentes com IA",
+    summary="Transforme vídeos longos em cortes dos melhores momentos.",
+    description="""
+## 🎬 Gerador de cortes inteligentes
+
+Envie um **link de vídeo** ou faça **upload de um arquivo**. O sistema:
+
+1. baixa/recebe o vídeo;
+2. transcreve o áudio com Whisper;
+3. analisa o contexto com Gemini;
+4. escolhe os melhores momentos;
+5. gera os cortes automaticamente com FFmpeg.
+
+### Como usar com um link
+Abra **🎬 Processar vídeo → Analisar vídeo por link**, clique em **Try it out**, cole a URL e clique em **Execute**.
+
+Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
+
+Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
+""",
+    version="3.1.0",
+    contact={"name": "Video Processor AI"},
+    openapi_tags=[
+        {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
+        {"name": "📊 Acompanhar processamento", "description": "Veja o progresso da análise e o resultado do processamento."},
+        {"name": "⬇️ Baixar resultados", "description": "Baixe individualmente os cortes gerados."},
+        {"name": "⚙️ Sistema", "description": "Status e manutenção da aplicação."},
+    ],
+)
 
 class VideoRequest(BaseModel):
     url: HttpUrl
@@ -107,7 +136,7 @@ def health():
     return {
         "status": "online",
         "service": "Video Processor AI",
-        "version": "3.0.0",
+        "version": "3.1.0",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
     }
