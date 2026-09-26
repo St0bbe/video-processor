@@ -131,12 +131,22 @@ def _cleanup_old_files():
 def startup_cleanup():
     _cleanup_old_files()
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def interface():
+    page = BASE_DIR / "static" / "index.html"
+    if not page.exists():
+        return HTMLResponse(
+            "<h1>Interface não encontrada.</h1><p>Verifique static/index.html.</p>",
+            status_code=500,
+        )
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+@app.get("/api/status", tags=["⚙️ Sistema"], summary="Verificar se o sistema está online")
 def health():
     return {
         "status": "online",
-        "service": "Video Processor AI",
-        "version": "3.1.0",
+        "service": "Cortes Inteligentes com IA",
+        "version": "3.2.0",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
     }
