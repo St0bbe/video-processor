@@ -315,7 +315,12 @@ def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: i
             raise RuntimeError("A IA não encontrou cortes válidos dentro do contexto.")
 
         _update_job(job_id, status="cutting", progress=80, message="Gerando cortes e adicionando legendas")
-        arquivos = cortar_segmentos(\n            video_path,\n            str(output_dir),\n            melhores,\n            transcript_segments=transcricao["segments"],\n        )
+        arquivos = cortar_segmentos(
+            video_path,
+            str(output_dir),
+            melhores,
+            transcript_segments=transcricao["segments"],
+        )
 
         result = {
             "duration": transcricao["duration"],
