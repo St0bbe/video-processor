@@ -51,7 +51,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.4.0",
+    version="3.4.1",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -105,10 +105,11 @@ def _probe_duration(video_path: str) -> float:
         raise RuntimeError("Não foi possível obter a duração do vídeo.")
     return float(result.stdout.strip())
 
-def _validate_video_limits(video_path: str):
+def _validate_video_limits(video_path: str, source_type: str = "upload"):
     size_mb = Path(video_path).stat().st_size / (1024 * 1024)
-    if size_mb > MAX_UPLOAD_MB:
-        raise ValueError(f"Arquivo excede o limite de {MAX_UPLOAD_MB} MB.")
+    size_limit = MAX_DOWNLOADED_VIDEO_MB if source_type == "url" else MAX_UPLOAD_MB
+    if size_mb > size_limit:
+        raise ValueError(f"Arquivo excede o limite de {size_limit} MB.")
 
     duration = _probe_duration(video_path)
     if duration > MAX_VIDEO_MINUTES * 60:
@@ -147,8 +148,9 @@ def health():
     return {
         "status": "online",
         "service": "Cortes Inteligentes com IA",
-        "version": "3.4.0",
+        "version": "3.4.1",
         "max_upload_mb": MAX_UPLOAD_MB,
+        "max_downloaded_video_mb": MAX_DOWNLOADED_VIDEO_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
     }
 
