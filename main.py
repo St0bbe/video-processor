@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field, HttpUrl
 
-from transcriber import transcrever_video
+from transcriber import transcrever_video, preload_model
 from ai_editor import analisar_video_com_gemini
 from cutter import cortar_segmentos
 
@@ -51,7 +51,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.4.1",
+    version="3.5.0",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -133,6 +133,17 @@ def _cleanup_old_files():
 def startup_cleanup():
     _cleanup_old_files()
 
+    # Pré-carrega o Whisper sem bloquear a inicialização da interface.
+    # Na primeira execução o modelo é baixado e fica em cache para os próximos vídeos.
+    def _warmup_whisper():
+        try:
+            preload_model()
+            print("Whisper carregado e pronto para transcrever.")
+        except Exception as exc:
+            print(f"Aviso: não foi possível pré-carregar o Whisper: {exc}")
+
+    threading.Thread(target=_warmup_whisper, daemon=True).start()
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def interface():
     page = BASE_DIR / "static" / "index.html"
@@ -148,7 +159,7 @@ def health():
     return {
         "status": "online",
         "service": "Cortes Inteligentes com IA",
-        "version": "3.4.1",
+        "version": "3.5.0",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_downloaded_video_mb": MAX_DOWNLOADED_VIDEO_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
@@ -219,8 +230,20 @@ def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: i
         _update_job(job_id, status="validating", progress=5, message="Validando vídeo")
         _validate_video_limits(video_path, source_type)
 
-        _update_job(job_id, status="transcribing", progress=15, message="Transcrevendo vídeo")
-        transcricao = transcrever_video(video_path)
+        _update_job(job_id, status="transcribing", progress=15, message="Preparando transcrição")
+
+        def transcription_progress(progress: int, message: str):
+            _update_job(
+                job_id,
+                status="transcribing",
+                progress=progress,
+                message=message,
+            )
+
+        transcricao = transcrever_video(
+            video_path,
+            progress_callback=transcription_progress,
+        )
 
         _update_job(job_id, status="analyzing", progress=55, message="Analisando melhores momentos")
         melhores = analisar_video_com_gemini(
