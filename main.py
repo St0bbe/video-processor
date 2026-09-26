@@ -52,7 +52,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.6.0",
+    version="3.7.0",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -160,7 +160,7 @@ def health():
     return {
         "status": "online",
         "service": "Cortes Inteligentes com IA",
-        "version": "3.6.0",
+        "version": "3.7.0",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_downloaded_video_mb": MAX_DOWNLOADED_VIDEO_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
@@ -314,8 +314,8 @@ def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: i
         if not melhores:
             raise RuntimeError("A IA não encontrou cortes válidos dentro do contexto.")
 
-        _update_job(job_id, status="cutting", progress=80, message="Gerando cortes")
-        arquivos = cortar_segmentos(video_path, str(output_dir), melhores)
+        _update_job(job_id, status="cutting", progress=80, message="Gerando cortes e adicionando legendas")
+        arquivos = cortar_segmentos(\n            video_path,\n            str(output_dir),\n            melhores,\n            transcript_segments=transcricao["segments"],\n        )
 
         result = {
             "duration": transcricao["duration"],
