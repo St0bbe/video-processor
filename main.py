@@ -54,7 +54,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.7.0",
+    version="3.8.0",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -69,6 +69,7 @@ class VideoRequest(BaseModel):
     max_cortes: int = Field(default=3, ge=1, le=10)
     min_duracao: int = Field(default=45, ge=15, le=600)
     max_duracao: int = Field(default=180, ge=20, le=900)
+    logo_path: Optional[str] = None
 
 def _job_path(job_id: str) -> Path:
     return JOBS_DIR / f"{job_id}.json"
@@ -261,7 +262,7 @@ def baixar_video(url: str, destination: Path) -> str:
         raise RuntimeError("O download terminou, mas o arquivo não foi encontrado.")
     return str(destination)
 
-def _processar_url_job(job_id: str, url: str, destination: str, max_cortes: int, min_duracao: int, max_duracao: int):
+def _processar_url_job(job_id: str, url: str, destination: str, max_cortes: int, min_duracao: int, max_duracao: int, logo_path: str | None = None):
     try:
         _update_job(
             job_id,
@@ -270,7 +271,7 @@ def _processar_url_job(job_id: str, url: str, destination: str, max_cortes: int,
             message="Baixando o vídeo. Em vídeos longos isso pode levar alguns minutos.",
         )
         baixar_video(url, Path(destination))
-        _processar_job(job_id, destination, max_cortes, min_duracao, max_duracao, "url")
+        _processar_job(job_id, destination, max_cortes, min_duracao, max_duracao, "url", logo_path)
     except Exception as exc:
         _cleanup_download_artifacts(Path(destination), keep_final=False)
         _update_job(
@@ -281,7 +282,7 @@ def _processar_url_job(job_id: str, url: str, destination: str, max_cortes: int,
             error=str(exc),
         )
 
-def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: int, max_duracao: int, source_type: str = "upload"):
+def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: int, max_duracao: int, source_type: str = "upload", logo_path: str | None = None):
     output_dir = CLIPS_DIR / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -322,6 +323,8 @@ def _processar_job(job_id: str, video_path: str, max_cortes: int, min_duracao: i
             str(output_dir),
             melhores,
             transcript_segments=transcricao["segments"],
+            logo_path=logo_path,
+            vertical=True,
         )
 
         result = {
@@ -370,7 +373,7 @@ def _create_job(source_type: str, source: str, video_path: str, max_cortes: int,
     })
     thread = threading.Thread(
         target=_processar_job,
-        args=(job_id, video_path, max_cortes, min_duracao, max_duracao, source_type),
+        args=(job_id, video_path, max_cortes, min_duracao, max_duracao, source_type, None),
         daemon=True,
     )
     thread.start()
@@ -406,6 +409,7 @@ def process_url(data: VideoRequest):
             data.max_cortes,
             data.min_duracao,
             data.max_duracao,
+            data.logo_path,
         ),
         daemon=True,
     )
@@ -415,6 +419,7 @@ def process_url(data: VideoRequest):
 @app.post("/process-upload")
 async def process_upload(
     file: UploadFile = File(...),
+    logo: Optional[UploadFile] = File(default=None),
     max_cortes: int = Query(default=3, ge=1, le=10),
     min_duracao: int = Query(default=45, ge=15, le=600),
     max_duracao: int = Query(default=180, ge=20, le=900),
@@ -444,14 +449,40 @@ async def process_upload(
     finally:
         await file.close()
 
-    return _create_job(
-        "upload",
-        file.filename or destination.name,
-        str(destination),
-        max_cortes,
-        min_duracao,
-        max_duracao,
+    logo_path = None
+    if logo and logo.filename:
+        logo_suffix = Path(logo.filename).suffix.lower()
+        if logo_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            destination.unlink(missing_ok=True)
+            await logo.close()
+            raise HTTPException(status_code=400, detail="Logo deve ser PNG, JPG, JPEG ou WEBP.")
+        logo_destination = UPLOAD_DIR / f"{uuid.uuid4()}_logo{logo_suffix}"
+        try:
+            logo_data = await logo.read()
+            if len(logo_data) > 10 * 1024 * 1024:
+                destination.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="A logo deve ter no máximo 10 MB.")
+            logo_destination.write_bytes(logo_data)
+            logo_path = str(logo_destination)
+        finally:
+            await logo.close()
+
+    _validate_durations(min_duracao, max_duracao)
+    job_id = str(uuid.uuid4())
+    now = time.time()
+    _save_job(job_id, {
+        "job_id": job_id, "status": "queued", "progress": 0, "message": "Na fila",
+        "source_type": "upload", "source": file.filename or destination.name,
+        "video_path": str(destination), "logo_path": logo_path,
+        "created_at": now, "updated_at": now, "result": None, "error": None,
+    })
+    thread = threading.Thread(
+        target=_processar_job,
+        args=(job_id, str(destination), max_cortes, min_duracao, max_duracao, "upload", logo_path),
+        daemon=True,
     )
+    thread.start()
+    return _load_job(job_id)
 
 @app.get("/jobs/{job_id}")
 def job_status(job_id: str):
