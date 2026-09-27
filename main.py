@@ -11,12 +11,14 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field, HttpUrl
+from dotenv import load_dotenv
 
 from transcriber import transcrever_video, preload_model
 from ai_editor import analisar_video_com_gemini
 from cutter import cortar_segmentos
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 UPLOAD_DIR = BASE_DIR / "uploads"
 CLIPS_DIR = BASE_DIR / "clips"
