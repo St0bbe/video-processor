@@ -54,7 +54,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.8.0",
+    version="3.8.1",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -380,37 +380,46 @@ def _create_job(source_type: str, source: str, video_path: str, max_cortes: int,
     return _load_job(job_id)
 
 @app.post("/process-url")
-def process_url(data: VideoRequest):
-    _validate_durations(data.min_duracao, data.max_duracao)
+async def process_url(
+    url: str = Query(...),
+    max_cortes: int = Query(default=3, ge=1, le=10),
+    min_duracao: int = Query(default=45, ge=15, le=600),
+    max_duracao: int = Query(default=180, ge=20, le=900),
+    logo: Optional[UploadFile] = File(default=None),
+):
+    _validate_durations(min_duracao, max_duracao)
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Link de vídeo inválido.")
+
     job_id = str(uuid.uuid4())
     destination = DOWNLOAD_DIR / f"{job_id}.mp4"
+    logo_path = None
+
+    if logo and logo.filename:
+        logo_suffix = Path(logo.filename).suffix.lower()
+        if logo_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            await logo.close()
+            raise HTTPException(status_code=400, detail="Logo deve ser PNG, JPG, JPEG ou WEBP.")
+        logo_destination = UPLOAD_DIR / f"{job_id}_logo{logo_suffix}"
+        try:
+            logo_data = await logo.read()
+            if len(logo_data) > 10 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="A logo deve ter no máximo 10 MB.")
+            logo_destination.write_bytes(logo_data)
+            logo_path = str(logo_destination)
+        finally:
+            await logo.close()
+
     now = time.time()
-
     _save_job(job_id, {
-        "job_id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "message": "Preparando download",
-        "source_type": "url",
-        "source": str(data.url),
-        "video_path": str(destination),
-        "created_at": now,
-        "updated_at": now,
-        "result": None,
-        "error": None,
+        "job_id": job_id, "status": "queued", "progress": 0,
+        "message": "Preparando download", "source_type": "url",
+        "source": url, "video_path": str(destination), "logo_path": logo_path,
+        "created_at": now, "updated_at": now, "result": None, "error": None,
     })
-
     thread = threading.Thread(
         target=_processar_url_job,
-        args=(
-            job_id,
-            str(data.url),
-            str(destination),
-            data.max_cortes,
-            data.min_duracao,
-            data.max_duracao,
-            data.logo_path,
-        ),
+        args=(job_id, url, str(destination), max_cortes, min_duracao, max_duracao, logo_path),
         daemon=True,
     )
     thread.start()
