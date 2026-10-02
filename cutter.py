@@ -106,7 +106,7 @@ def cortar_segmentos(
         if has_logo:
             logo_input = "[1:v]"
             filters.append(f"{logo_input}scale='min(260,iw)':-1[logo]")
-            filters.append(f"{base}[logo]overlay=W-w-36:36:format=auto[outv]")
+            filters.append(f"{base}[logo]overlay=W-w-36:H-h-70:format=auto[outv]")
             base = "[outv]"
 
         if not filters:
