@@ -30,8 +30,16 @@ def _configurar_cliente():
         raise RuntimeError("Defina a variável de ambiente GEMINI_API_KEY.")
     return genai.Client(api_key=api_key)
 
-def _modelo():
-    return os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+def _modelos():
+    configured = os.getenv("GEMINI_MODELS", "").strip()
+    if configured:
+        return [m.strip() for m in configured.split(",") if m.strip()]
+    single = os.getenv("GEMINI_MODEL", "").strip()
+    models = [single] if single else []
+    for model in ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"):
+        if model not in models:
+            models.append(model)
+    return models
 
 def _is_transient_gemini_error(exc: Exception) -> bool:
     text = str(exc).lower()
@@ -41,41 +49,47 @@ def _is_transient_gemini_error(exc: Exception) -> bool:
         "high demand", "temporarily", "timeout",
     ))
 
-
 def _gerar_json(client, prompt: str):
-    max_attempts = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "6")))
-    base_delay = max(1.0, float(os.getenv("GEMINI_RETRY_BASE_SECONDS", "3")))
+    attempts_per_model = max(1, int(os.getenv("GEMINI_ATTEMPTS_PER_MODEL", "2")))
+    base_delay = max(1.0, float(os.getenv("GEMINI_RETRY_BASE_SECONDS", "2")))
+    models = _modelos()
+    last_exc = None
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = client.models.generate_content(
-                model=_modelo(),
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
-            )
-            if not response.text:
-                raise RuntimeError("Gemini não retornou conteúdo.")
-            return _parse_json_response(response.text)
-        except Exception as exc:
-            if not _is_transient_gemini_error(exc) or attempt >= max_attempts:
-                if _is_transient_gemini_error(exc):
-                    raise RuntimeError(
-                        "O Gemini está temporariamente sobrecarregado. "
-                        f"Foram feitas {max_attempts} tentativas automáticas. "
-                        "Tente novamente em alguns minutos."
-                    ) from exc
-                raise
+    for model_index, model in enumerate(models):
+        for attempt in range(1, attempts_per_model + 1):
+            try:
+                print(f"Gemini: usando {model} (tentativa {attempt}/{attempts_per_model})")
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                    ),
+                )
+                if not response.text:
+                    raise RuntimeError("Gemini não retornou conteúdo.")
+                return _parse_json_response(response.text)
+            except Exception as exc:
+                last_exc = exc
+                if not _is_transient_gemini_error(exc):
+                    # 404/indisponibilidade específica do modelo: tenta o próximo.
+                    text = str(exc).lower()
+                    if "404" in text or "not_found" in text or "not found" in text:
+                        print(f"Gemini: {model} não disponível para esta conta. Tentando próximo modelo...")
+                        break
+                    raise
+                if attempt < attempts_per_model:
+                    delay = min(12.0, base_delay * (2 ** (attempt - 1)))
+                    delay += random.uniform(0, min(1.0, delay * 0.2))
+                    print(f"Gemini: {model} temporariamente indisponível. Nova tentativa em {delay:.1f}s...")
+                    time.sleep(delay)
+                else:
+                    print(f"Gemini: {model} continuou indisponível. Alternando para o próximo modelo...")
 
-            delay = min(45.0, base_delay * (2 ** (attempt - 1)))
-            delay += random.uniform(0, min(2.0, delay * 0.2))
-            print(
-                f"Gemini temporariamente indisponível "
-                f"(tentativa {attempt}/{max_attempts}). "
-                f"Nova tentativa em {delay:.1f}s..."
-            )
-            time.sleep(delay)
+    raise RuntimeError(
+        "Os modelos do Gemini estão temporariamente indisponíveis. "
+        f"O sistema tentou automaticamente: {', '.join(models)}."
+    ) from last_exc
 
 def _parse_json_response(text: str):
     text = text.strip()
