@@ -148,6 +148,13 @@ def startup_cleanup():
 
     threading.Thread(target=_warmup_whisper, daemon=True).start()
 
+@app.get("/termos", response_class=HTMLResponse, include_in_schema=False)
+def termos():
+    page = BASE_DIR / "static" / "termos.html"
+    if not page.exists():
+        raise HTTPException(status_code=404, detail="Termos de Serviço não encontrados.")
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def interface():
     page = BASE_DIR / "static" / "index.html"
