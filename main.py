@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field, HttpUrl
 from dotenv import load_dotenv
 
 from transcriber import transcrever_video, preload_model
 from ai_editor import analisar_video_com_gemini
 from cutter import cortar_segmentos
+from tiktok_integration import TikTokIntegration, TikTokIntegrationError
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -29,6 +30,7 @@ MAX_DOWNLOADED_VIDEO_MB = int(os.getenv("MAX_DOWNLOADED_VIDEO_MB", "8192"))
 MAX_VIDEO_MINUTES = int(os.getenv("MAX_VIDEO_MINUTES", "240"))
 RETENTION_HOURS = int(os.getenv("RETENTION_HOURS", "48"))
 MIN_FREE_DISK_GB = float(os.getenv("MIN_FREE_DISK_GB", "8"))
+TIKTOK = TikTokIntegration(BASE_DIR)
 
 for folder in (DOWNLOAD_DIR, UPLOAD_DIR, CLIPS_DIR, JOBS_DIR):
     folder.mkdir(exist_ok=True)
@@ -54,7 +56,7 @@ Depois copie o `job_id` retornado e consulte **📊 Acompanhar processamento**.
 
 Quando o status for `done`, baixe os cortes em **⬇️ Baixar resultados**.
 """,
-    version="3.8.1",
+    version="3.9.0",
     contact={"name": "Video Processor AI"},
     openapi_tags=[
         {"name": "🎬 Processar vídeo", "description": "Envie um link ou arquivo para encontrar e gerar os melhores cortes."},
@@ -172,12 +174,103 @@ def interface():
         )
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
+class TikTokPublishRequest(BaseModel):
+    job_id: str
+    clip_index: int = Field(ge=1)
+    title: str = Field(default="", max_length=2200)
+    privacy_level: str
+    disable_comment: bool = False
+    disable_duet: bool = False
+    disable_stitch: bool = False
+    is_aigc: bool = False
+
+
+@app.get("/auth/tiktok", include_in_schema=False)
+def tiktok_login():
+    try:
+        return RedirectResponse(TIKTOK.authorization_url())
+    except TikTokIntegrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/auth/tiktok/callback", include_in_schema=False)
+def tiktok_callback(
+    code: Optional[str] = Query(default=None),
+    state: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    error_description: Optional[str] = Query(default=None),
+):
+    if error:
+        message = error_description or error
+        return RedirectResponse("/?tiktok=error&message=" + TIKTOK.quote(message))
+    if not code or not state:
+        return RedirectResponse("/?tiktok=error&message=Resposta%20OAuth%20incompleta")
+    try:
+        TIKTOK.exchange_code(code, state)
+        return RedirectResponse("/?tiktok=connected")
+    except TikTokIntegrationError as exc:
+        return RedirectResponse("/?tiktok=error&message=" + TIKTOK.quote(str(exc)))
+
+
+@app.get("/api/tiktok/status", tags=["TikTok"])
+def tiktok_status():
+    return TIKTOK.status()
+
+
+@app.post("/api/tiktok/disconnect", tags=["TikTok"])
+def tiktok_disconnect():
+    TIKTOK.disconnect()
+    return {"connected": False}
+
+
+@app.post("/api/tiktok/creator-info", tags=["TikTok"])
+def tiktok_creator_info():
+    try:
+        return TIKTOK.creator_info()
+    except TikTokIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/tiktok/publish", tags=["TikTok"])
+def tiktok_publish(payload: TikTokPublishRequest):
+    job = _load_job(payload.job_id)
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="O processamento ainda não terminou.")
+    clips = (job.get("result") or {}).get("clips") or []
+    if payload.clip_index > len(clips):
+        raise HTTPException(status_code=404, detail="Corte não encontrado.")
+    clip_path = Path(clips[payload.clip_index - 1]["file"]).resolve()
+    expected_root = (CLIPS_DIR / payload.job_id).resolve()
+    if expected_root not in clip_path.parents or not clip_path.exists():
+        raise HTTPException(status_code=404, detail="Arquivo do corte não encontrado.")
+    try:
+        return TIKTOK.publish_video(
+            clip_path,
+            title=payload.title,
+            privacy_level=payload.privacy_level,
+            disable_comment=payload.disable_comment,
+            disable_duet=payload.disable_duet,
+            disable_stitch=payload.disable_stitch,
+            is_aigc=payload.is_aigc,
+        )
+    except TikTokIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/tiktok/publish-status/{publish_id}", tags=["TikTok"])
+def tiktok_publish_status(publish_id: str):
+    try:
+        return TIKTOK.publish_status(publish_id)
+    except TikTokIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/api/status", tags=["⚙️ Sistema"], summary="Verificar se o sistema está online")
 def health():
     return {
         "status": "online",
         "service": "Cortes Inteligentes com IA",
-        "version": "3.7.0",
+        "version": "3.9.0",
         "max_upload_mb": MAX_UPLOAD_MB,
         "max_downloaded_video_mb": MAX_DOWNLOADED_VIDEO_MB,
         "max_video_minutes": MAX_VIDEO_MINUTES,
