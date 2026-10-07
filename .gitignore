@@ -13,3 +13,6 @@ jobs/
 *.mkv
 *.webm
 *.avi
+
+# Tokens OAuth locais
+.tiktok/
