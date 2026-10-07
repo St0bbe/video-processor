@@ -155,6 +155,13 @@ def termos():
         raise HTTPException(status_code=404, detail="Termos de Serviço não encontrados.")
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
+@app.get("/privacidade", response_class=HTMLResponse, include_in_schema=False)
+def privacidade():
+    page = BASE_DIR / "static" / "privacidade.html"
+    if not page.exists():
+        raise HTTPException(status_code=404, detail="Política de Privacidade não encontrada.")
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def interface():
     page = BASE_DIR / "static" / "index.html"
