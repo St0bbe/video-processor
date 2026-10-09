@@ -279,19 +279,35 @@ def health():
 def _yt_dlp_js_args():
     """Configura um runtime JS suportado pelo yt-dlp para os desafios do YouTube."""
     if shutil.which("deno"):
-        return ["--js-runtimes", "deno"]
+        return ["--js-runtimes", f"deno:{shutil.which('deno')}"]
     if shutil.which("node"):
-        return ["--js-runtimes", "node"]
+        return ["--js-runtimes", f"node:{shutil.which('node')}"]
     if shutil.which("bun"):
-        return ["--js-runtimes", "bun"]
+        return ["--js-runtimes", f"bun:{shutil.which('bun')}"]
     if shutil.which("qjs"):
-        return ["--js-runtimes", "quickjs"]
+        return ["--js-runtimes", f"quickjs:{shutil.which('qjs')}"]
     return []
+
+
+def _yt_dlp_cookie_args():
+    """Usa cookies locais sem registrar ou expor seu conteúdo."""
+    configured = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
+    if not configured:
+        return []
+    cookie_path = Path(configured).expanduser()
+    if not cookie_path.is_absolute():
+        cookie_path = BASE_DIR / cookie_path
+    if not cookie_path.is_file():
+        raise RuntimeError("Arquivo de cookies do YouTube não encontrado. Confira YOUTUBE_COOKIES_FILE.")
+    return ["--cookies", str(cookie_path)]
 
 
 def _friendly_ytdlp_error(stderr: str) -> str:
     text = stderr or ""
     lower = text.lower()
+    if "sign in to confirm" in lower or "not a bot" in lower:
+        return ("O YouTube solicitou autenticação para liberar o vídeo. "
+                "Configure ou atualize YOUTUBE_COOKIES_FILE no servidor.")
     if "no supported javascript runtime" in lower:
         return (
             "O YouTube exige um runtime JavaScript para liberar este vídeo. "
@@ -329,10 +345,12 @@ def _cleanup_download_artifacts(destination: Path, keep_final: bool = False):
 
 
 def baixar_video(url: str, destination: Path) -> str:
+    _ensure_disk_space(destination.parent)
     js_args = _yt_dlp_js_args()
+    cookie_args = _yt_dlp_cookie_args()
     info_cmd = [
         "yt-dlp", "--no-playlist", "--dump-single-json",
-        "--skip-download", *js_args, url,
+        "--skip-download", *js_args, *cookie_args, url,
     ]
     info_result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=60)
     if info_result.returncode != 0:
@@ -355,6 +373,7 @@ def baixar_video(url: str, destination: Path) -> str:
         "--socket-timeout", "30",
         "--retries", "3",
         *js_args,
+        *cookie_args,
         "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/best[height<=720]",
         "--merge-output-format", "mp4",
         "--force-overwrites",
