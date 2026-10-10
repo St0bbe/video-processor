@@ -39,6 +39,55 @@ def _write_srt(path: Path, items):
     path.write_text("\n".join(blocks), encoding="utf-8")
 
 
+
+def _ass_time(t):
+    cs = max(0, round(t * 100))
+    h, rem = divmod(cs, 360000)
+    m, rem = divmod(rem, 6000)
+    s, cs = divmod(rem, 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _write_karaoke(path, segments, clip_start, clip_end, font, margin):
+    header = (
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n"
+        "WrapStyle: 2\nScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Karaoke,{font},58,&H0000D7FF,&H00FFFFFF,&H00000000,&H80000000,"
+        f"-1,0,0,0,100,100,0,0,1,3,1,2,65,65,{margin},1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    events = []
+    for seg in segments or []:
+        words = []
+        for w in seg.get("words") or []:
+            start, end = float(w["start"]), float(w["end"])
+            token = str(w["word"]).strip().replace("{", "(").replace("}", ")").replace("\\", "")
+            if token and end > clip_start and start < clip_end:
+                words.append((max(0, start - clip_start), min(clip_end, end) - clip_start, token))
+        for index in range(0, len(words), 5):
+            group = words[index:index + 5]
+            if not group:
+                continue
+            start, end = group[0][0], max(w[1] for w in group)
+            if end <= start:
+                continue
+            parts = []
+            cursor = start
+            for ws, we, token in group:
+                if ws > cursor:
+                    parts.append(r"{\k" + str(max(1, round((ws - cursor) * 100))) + "}")
+                parts.append(r"{\kf" + str(max(1, round((we - max(cursor, ws)) * 100))) + "}" + token + " ")
+                cursor = max(cursor, we)
+            events.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Karaoke,,0,0,0,,{''.join(parts).strip()}\n")
+    if events:
+        path.write_text(header + "".join(events), encoding="utf-8")
+    return bool(events)
+
+
 def _ffmpeg_filter_path(path: Path) -> str:
     value = path.resolve().as_posix()
     value = value.replace(":", r"\:")
@@ -59,7 +108,7 @@ def cortar_segmentos(
     subtitles_enabled = os.getenv("BURN_SUBTITLES", "true").lower() not in {"0", "false", "no", "off"}
     font_name = os.getenv("SUBTITLE_FONT", "Arial")
     font_size = int(os.getenv("SUBTITLE_FONT_SIZE", "22"))
-    margin_v = int(os.getenv("SUBTITLE_MARGIN_V", "210" if vertical else "42"))
+    margin_v = int(os.getenv("SUBTITLE_MARGIN_V", "110" if vertical else "42"))
     logo_file = Path(logo_path) if logo_path else None
     has_logo = bool(logo_file and logo_file.exists())
 
@@ -72,8 +121,13 @@ def cortar_segmentos(
         srt_path = Path(output_dir) / f"{indice:02d}_{_slug(segmento.get('title', 'corte'))}.srt"
 
         subtitle_items = _subtitle_segments(transcript_segments, inicio, fim)
+        ass_path = srt_path.with_suffix(".ass")
+        karaoke = False
         if subtitles_enabled and subtitle_items:
-            _write_srt(srt_path, subtitle_items)
+            if os.getenv("SUBTITLE_KARAOKE", "true").lower() not in {"false", "0", "off"}:
+                karaoke = _write_karaoke(ass_path, transcript_segments, inicio, fim, font_name, margin_v)
+            if not karaoke:
+                _write_srt(srt_path, subtitle_items)
 
         inputs = ["-ss", f"{inicio:.3f}", "-i", input_path]
         if has_logo:
@@ -93,14 +147,17 @@ def cortar_segmentos(
             base = "[canvas]"
 
         if subtitles_enabled and subtitle_items:
-            subtitle_file = _ffmpeg_filter_path(srt_path)
+            subtitle_file = _ffmpeg_filter_path(ass_path if karaoke else srt_path)
             style = (
                 f"FontName={font_name},FontSize={font_size},"
                 "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
                 "BorderStyle=1,Outline=2,Shadow=1,Alignment=2,"
                 f"MarginV={margin_v}"
             )
-            filters.append(f"{base}subtitles='{subtitle_file}':force_style='{style}'[subbed]")
+            if karaoke:
+                filters.append(f"{base}subtitles='{subtitle_file}'[subbed]")
+            else:
+                filters.append(f"{base}subtitles='{subtitle_file}':force_style='{style}'[subbed]")
             base = "[subbed]"
 
         if has_logo:
@@ -122,6 +179,7 @@ def cortar_segmentos(
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         srt_path.unlink(missing_ok=True)
+        ass_path.unlink(missing_ok=True)
         if result.returncode != 0:
             raise RuntimeError(f"FFmpeg falhou no corte {indice}: {result.stderr[-1600:]}")
 
