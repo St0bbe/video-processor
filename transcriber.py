@@ -97,7 +97,7 @@ def transcrever_video(
         # contextualizados e evitam o custo elevado de word_timestamps.
         device = os.getenv("WHISPER_DEVICE", "cpu")
         beam_size = int(os.getenv("WHISPER_BEAM_SIZE", "1" if device == "cpu" else "3"))
-        word_timestamps = os.getenv("WHISPER_WORD_TIMESTAMPS", "false").lower() == "true"
+        word_timestamps = os.getenv("WHISPER_WORD_TIMESTAMPS", "true").lower() == "true"
 
         segments, info = model.transcribe(
             audio_path,
